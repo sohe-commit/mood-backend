@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
 
 export interface Mood {
   date: string;
@@ -9,39 +9,47 @@ export interface Mood {
 
 @Injectable()
 export class MoodService {
-  private db = new DatabaseSync('moods.db');
+  // TURSO_DATABASE_URL이 있으면 외부 DB(배포용), 없으면 로컬 파일을 쓴다.
+  private db = createClient({
+    url: process.env.TURSO_DATABASE_URL ?? 'file:moods.db',
+    authToken: process.env.TURSO_AUTH_TOKEN,
+  });
 
-  constructor() {
-    this.db.exec(
-      `CREATE TABLE IF NOT EXISTS moods (
-        date TEXT PRIMARY KEY,
-        mood INTEGER NOT NULL,
-        note TEXT NOT NULL DEFAULT ''
-      )`,
-    );
-  }
+  private ready = this.db.execute(
+    `CREATE TABLE IF NOT EXISTS moods (
+      date TEXT PRIMARY KEY,
+      mood INTEGER NOT NULL,
+      note TEXT NOT NULL DEFAULT ''
+    )`,
+  );
 
-  list(limit: number): Mood[] {
-    return this.db
-      .prepare('SELECT date, mood, note FROM moods ORDER BY date DESC LIMIT ?')
-      .all(limit) as unknown as Mood[];
+  async list(limit: number): Promise<Mood[]> {
+    await this.ready;
+    const r = await this.db.execute({
+      sql: 'SELECT date, mood, note FROM moods ORDER BY date DESC LIMIT ?',
+      args: [limit],
+    });
+    return r.rows as unknown as Mood[];
   }
 
   // month: 'YYYY-MM'
-  listByMonth(month: string): Mood[] {
-    return this.db
-      .prepare('SELECT date, mood, note FROM moods WHERE date LIKE ? ORDER BY date')
-      .all(`${month}-%`) as unknown as Mood[];
+  async listByMonth(month: string): Promise<Mood[]> {
+    await this.ready;
+    const r = await this.db.execute({
+      sql: 'SELECT date, mood, note FROM moods WHERE date LIKE ? ORDER BY date',
+      args: [`${month}-%`],
+    });
+    return r.rows as unknown as Mood[];
   }
 
   // 하루에 하나만 기록한다. 같은 날 다시 저장하면 덮어쓴다.
-  save(date: string, mood: number, note: string): Mood {
-    this.db
-      .prepare(
-        `INSERT INTO moods (date, mood, note) VALUES (?, ?, ?)
-         ON CONFLICT(date) DO UPDATE SET mood = excluded.mood, note = excluded.note`,
-      )
-      .run(date, mood, note);
+  async save(date: string, mood: number, note: string): Promise<Mood> {
+    await this.ready;
+    await this.db.execute({
+      sql: `INSERT INTO moods (date, mood, note) VALUES (?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET mood = excluded.mood, note = excluded.note`,
+      args: [date, mood, note],
+    });
     return { date, mood, note };
   }
 }
